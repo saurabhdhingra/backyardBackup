@@ -1,0 +1,80 @@
+{
+  "Databases": {
+    "myLocalSQLite": {
+      "Type": "sqlite",
+      "FilePath": "C:/path/to/your/database.db"
+    },
+    "myPostgres": {
+      "Type": "postgres",
+      "Host": "localhost",
+      "Port": 5432,
+      "User": "postgres",
+      "Password": "password",
+      "Database": "mydb",
+      "SSLMode": "disable"
+    },
+    "myMySQL": {
+      "Type": "mysql",
+      "Host": "localhost",
+      "Port": 3306,
+      "User": "root",
+      "Password": "password",
+      "Database": "mydb"
+    },
+    "myMongoDB": {
+      "Type": "mongodb",
+      "Host": "localhost",
+      "Port": 27017,
+      "Database": "mydb",
+      "Options": {
+        "authSource": "admin"
+      }
+    }
+  },
+  "Storage": {
+    "localBackups": {
+      "Type": "local",
+      "BasePath": "C:/backups"
+    },
+    "s3Backups": {
+      "Type": "s3",
+      "Bucket": "my-database-backups",
+      "Region": "us-west-2",
+      "AccessKey": "YOUR_ACCESS_KEY",
+      "SecretKey": "YOUR_SECRET_KEY"
+    },
+    "gcsBackups": {
+      "Type": "gcs",
+      "Bucket": "my-database-backups",
+      "AccessKey": "YOUR_ACCESS_KEY_FILE_PATH"
+    },
+    "azureBackups": {
+      "Type": "azure",
+      "Bucket": "my-database-backups",
+      "AccessKey": "YOUR_CONNECTION_STRING"
+    }
+  },
+  "Schedules": {
+    "default": {
+      "FullBackup": "0 0 * * 0",
+      "IncrementalBackup": "0 0 * * 1-6",
+      "DifferentialBackup": "",
+      "RetentionDays": 30,
+      "MaxBackups": 10
+    }
+  },
+  "Notifications": {
+    "SlackWebhookURL": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+    "EmailSMTP": "smtp.example.com:587",
+    "EmailFrom": "backups@example.com",
+    "EmailTo": ["admin@example.com"],
+    "OnSuccess": true,
+    "OnFailure": true
+  },
+  "LogLevel": "info",
+  "LogFile": "C:/logs/backyard-backup.log",
+  "DataDir": "C:/ProgramData/backyardBackup",
+  "Compression": true,
+  "Concurrency": 1,
+  "Timeout": 3600000000000
+} 
