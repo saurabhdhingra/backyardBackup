@@ -115,16 +115,21 @@ func (r *SelectiveRestorer) ValidateBackup(ctx context.Context, backupID string)
 		return false, fmt.Errorf("backup service not initialized")
 	}
 
-	// Try to get the backup
+	// Get backup details
 	backup, err := r.Backups.GetBackup(ctx, backupID)
 	if err != nil {
-		return false, fmt.Errorf("backup validation failed: %w", err)
+		return false, fmt.Errorf("failed to get backup info: %w", err)
 	}
 
-	// Check if backup exists in storage
+	// Check if backup exists and was successful
+	if !backup.Success {
+		return false, nil
+	}
+
+	// Check if backup file exists in storage
 	_, err = r.Storage.GetInfo(ctx, backup.StoragePath)
 	if err != nil {
-		return false, fmt.Errorf("backup file not found in storage: %w", err)
+		return false, nil
 	}
 
 	return true, nil
@@ -133,8 +138,8 @@ func (r *SelectiveRestorer) ValidateBackup(ctx context.Context, backupID string)
 // ListRestores returns a list of all restore operations
 func (r *SelectiveRestorer) ListRestores(ctx context.Context) ([]*RestoreResult, error) {
 	var results []*RestoreResult
-	for _, result := range r.restores {
-		results = append(results, result)
+	for _, restore := range r.restores {
+		results = append(results, restore)
 	}
 	return results, nil
 }

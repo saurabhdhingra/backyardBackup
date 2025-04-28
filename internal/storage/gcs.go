@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,191 +15,124 @@ import (
 
 // GCSProvider implements the Provider interface for Google Cloud Storage
 type GCSProvider struct {
-	client  *storage.Client
-	bucket  *storage.BucketHandle
-	config  ProviderConfig
+	client     *storage.Client
+	bucketName string
+	prefix     string
 }
 
-// Initialize sets up the GCS storage provider
-func (p *GCSProvider) Initialize(ctx context.Context, config ProviderConfig) error {
-	if config.Type != GCS {
-		return fmt.Errorf("invalid provider type: %s, expected: %s", config.Type, GCS)
+// NewGCSProvider creates a new GCS storage provider
+func NewGCSProvider(ctx context.Context, config *ProviderConfig) (*GCSProvider, error) {
+	if config.GCS == nil {
+		return nil, fmt.Errorf("GCS configuration is required")
 	}
 
-	// Validate required fields
-	if config.Bucket == "" {
-		return fmt.Errorf("bucket is required for GCS storage provider")
-	}
-
-	var opts []option.ClientOption
-	if config.AccessKey != "" {
-		// If credentials are provided directly
-		opts = append(opts, option.WithCredentialsJSON([]byte(config.AccessKey)))
-	}
-	if config.Endpoint != "" {
-		opts = append(opts, option.WithEndpoint(config.Endpoint))
-	}
-
-	// Create GCS client
-	client, err := storage.NewClient(ctx, opts...)
+	client, err := storage.NewClient(ctx, option.WithCredentialsFile(config.GCS.CredentialsFile))
 	if err != nil {
-		return fmt.Errorf("failed to create GCS client: %w", err)
+		return nil, fmt.Errorf("failed to create GCS client: %w", err)
 	}
 
-	// Get bucket handle
-	bucket := client.Bucket(config.Bucket)
-
-	// Check if bucket exists
-	_, err = bucket.Attrs(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to access bucket: %w", err)
-	}
-
-	p.client = client
-	p.bucket = bucket
-	p.config = config
-
-	return nil
+	return &GCSProvider{
+		client:     client,
+		bucketName: config.GCS.BucketName,
+		prefix:     config.GCS.Prefix,
+	}, nil
 }
 
-// Store saves data from a reader to the given path
-func (p *GCSProvider) Store(ctx context.Context, path string, r io.Reader, metadata map[string]string) error {
-	if p.client == nil {
-		return fmt.Errorf("gcs storage provider not initialized")
-	}
-
-	// Create object handle
-	obj := p.bucket.Object(path)
-
-	// Create writer
+// Store stores data in GCS
+func (p *GCSProvider) Store(ctx context.Context, path string, data io.Reader) error {
+	bucket := p.client.Bucket(p.bucketName)
+	obj := bucket.Object(filepath.Join(p.prefix, path))
 	writer := obj.NewWriter(ctx)
-	
-	// Set metadata
-	writer.Metadata = metadata
 
-	// Copy data
-	if _, err := io.Copy(writer, r); err != nil {
+	if _, err := io.Copy(writer, data); err != nil {
 		writer.Close()
-		return fmt.Errorf("failed to write data: %w", err)
+		return fmt.Errorf("failed to copy data to GCS: %w", err)
 	}
 
-	// Close writer
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("failed to close writer: %w", err)
+		return fmt.Errorf("failed to close GCS writer: %w", err)
 	}
 
 	return nil
 }
 
-// Retrieve retrieves data from the given path and writes it to the writer
-func (p *GCSProvider) Retrieve(ctx context.Context, path string, w io.Writer) error {
-	if p.client == nil {
-		return fmt.Errorf("gcs storage provider not initialized")
-	}
-
-	// Create object handle
-	obj := p.bucket.Object(path)
-
-	// Create reader
+// Retrieve retrieves data from GCS
+func (p *GCSProvider) Retrieve(ctx context.Context, path string) (io.ReadCloser, error) {
+	bucket := p.client.Bucket(p.bucketName)
+	obj := bucket.Object(filepath.Join(p.prefix, path))
 	reader, err := obj.NewReader(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create reader: %w", err)
-	}
-	defer reader.Close()
-
-	// Copy data
-	if _, err := io.Copy(w, reader); err != nil {
-		return fmt.Errorf("failed to read data: %w", err)
+		return nil, fmt.Errorf("failed to create GCS reader: %w", err)
 	}
 
-	return nil
+	return reader, nil
 }
 
-// Delete removes the file at the given path
+// Delete deletes a file from GCS
 func (p *GCSProvider) Delete(ctx context.Context, path string) error {
-	if p.client == nil {
-		return fmt.Errorf("gcs storage provider not initialized")
-	}
-
-	// Create object handle and delete
-	obj := p.bucket.Object(path)
+	bucket := p.client.Bucket(p.bucketName)
+	obj := bucket.Object(filepath.Join(p.prefix, path))
 	if err := obj.Delete(ctx); err != nil {
-		return fmt.Errorf("failed to delete object: %w", err)
+		return fmt.Errorf("failed to delete object from GCS: %w", err)
 	}
-
 	return nil
 }
 
-// List returns a list of files matching the given prefix
+// List lists files in GCS with the given prefix
 func (p *GCSProvider) List(ctx context.Context, prefix string) ([]FileInfo, error) {
-	if p.client == nil {
-		return nil, fmt.Errorf("gcs storage provider not initialized")
-	}
+	bucket := p.client.Bucket(p.bucketName)
+	fullPrefix := filepath.Join(p.prefix, prefix)
+	it := bucket.Objects(ctx, &storage.Query{Prefix: fullPrefix})
 
 	var files []FileInfo
-
-	// Create iterator
-	it := p.bucket.Objects(ctx, &storage.Query{
-		Prefix: prefix,
-	})
-
-	// Iterate through objects
 	for {
 		attrs, err := it.Next()
 		if err == iterator.Done {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to list objects: %w", err)
+			return nil, fmt.Errorf("failed to list objects in GCS: %w", err)
 		}
 
-		file := FileInfo{
-			Path:         attrs.Name,
+		// Skip directories (objects ending with /)
+		if strings.HasSuffix(attrs.Name, "/") {
+			continue
+		}
+
+		// Remove the provider's prefix from the path
+		relativePath := strings.TrimPrefix(attrs.Name, p.prefix)
+		relativePath = strings.TrimPrefix(relativePath, "/")
+
+		files = append(files, FileInfo{
+			Path:         relativePath,
 			Size:         attrs.Size,
 			LastModified: attrs.Updated,
-			ContentType:  attrs.ContentType,
-			IsDirectory:  strings.HasSuffix(attrs.Name, "/"),
-			Metadata:     attrs.Metadata,
-		}
-		files = append(files, file)
+		})
 	}
 
 	return files, nil
 }
 
-// GetInfo returns metadata about the file at the given path
+// GetInfo gets information about a file in GCS
 func (p *GCSProvider) GetInfo(ctx context.Context, path string) (*FileInfo, error) {
-	if p.client == nil {
-		return nil, fmt.Errorf("gcs storage provider not initialized")
-	}
-
-	// Get object attributes
-	attrs, err := p.bucket.Object(path).Attrs(ctx)
+	bucket := p.client.Bucket(p.bucketName)
+	obj := bucket.Object(filepath.Join(p.prefix, path))
+	attrs, err := obj.Attrs(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get object info: %w", err)
+		return nil, fmt.Errorf("failed to get object attributes from GCS: %w", err)
 	}
 
-	info := &FileInfo{
-		Path:         attrs.Name,
+	relativePath := strings.TrimPrefix(attrs.Name, p.prefix)
+	relativePath = strings.TrimPrefix(relativePath, "/")
+
+	return &FileInfo{
+		Path:         relativePath,
 		Size:         attrs.Size,
 		LastModified: attrs.Updated,
-		ContentType:  attrs.ContentType,
-		IsDirectory:  strings.HasSuffix(attrs.Name, "/"),
-		Metadata:     attrs.Metadata,
-	}
-
-	return info, nil
-}
-
-// Type returns the storage provider type
-func (p *GCSProvider) Type() StorageType {
-	return GCS
+	}, nil
 }
 
 // Close closes the GCS client
 func (p *GCSProvider) Close() error {
-	if p.client != nil {
-		return p.client.Close()
-	}
-	return nil
+	return p.client.Close()
 } 
