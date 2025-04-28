@@ -2,8 +2,10 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -79,15 +81,41 @@ func (c *MongoDBConnector) Backup(ctx context.Context, w io.Writer, collections 
 
 // Restore restores the database from a reader
 func (c *MongoDBConnector) Restore(ctx context.Context, r io.Reader) error {
+	if c.uri == "" {
+		return fmt.Errorf("database connection not initialized")
+	}
+
+	// Create temporary file to store the backup
+	tmpFile, err := os.CreateTemp("", "mongodb-restore-*.archive")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// Copy backup data to temporary file
+	if _, err := io.Copy(tmpFile, r); err != nil {
+		return fmt.Errorf("failed to write backup data: %w", err)
+	}
+
+	// Sync and seek to beginning
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync temporary file: %w", err)
+	}
+	if _, err := tmpFile.Seek(0, 0); err != nil {
+		return fmt.Errorf("failed to seek temporary file: %w", err)
+	}
+
+	// Create mongorestore command
 	args := []string{
 		"--uri", c.uri,
-		"--archive",
+		"--archive=" + tmpFile.Name(),
 		"--gzip",
-		"--drop", // Drop existing collections before restore
+		"--drop", // Drop collections before restoring
 	}
 
 	cmd := exec.CommandContext(ctx, "mongorestore", args...)
-	cmd.Stdin = r
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("mongorestore failed: %w", err)
@@ -98,10 +126,16 @@ func (c *MongoDBConnector) Restore(ctx context.Context, r io.Reader) error {
 
 // ListTables returns a list of all collections in the database
 func (c *MongoDBConnector) ListTables(ctx context.Context) ([]string, error) {
+	if c.uri == "" {
+		return nil, fmt.Errorf("database connection not initialized")
+	}
+
+	// Create mongosh command to list collections
+	query := `db.getCollectionNames().join('\n')`
 	args := []string{
 		"--uri", c.uri,
 		"--quiet",
-		"--eval", "db.getCollectionNames()",
+		"--eval", query,
 	}
 
 	cmd := exec.CommandContext(ctx, "mongosh", args...)
@@ -110,62 +144,67 @@ func (c *MongoDBConnector) ListTables(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("failed to list collections: %w", err)
 	}
 
-	// Parse the output which is in the format: [ "collection1", "collection2", ... ]
-	collections := strings.TrimSpace(string(output))
-	collections = strings.TrimPrefix(collections, "[")
-	collections = strings.TrimSuffix(collections, "]")
-	collections = strings.ReplaceAll(collections, "\"", "")
-	collections = strings.ReplaceAll(collections, " ", "")
-
-	if collections == "" {
+	// Parse output
+	collections := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(collections) == 1 && collections[0] == "" {
 		return []string{}, nil
 	}
 
-	return strings.Split(collections, ","), nil
+	return collections, nil
 }
 
 // GetInfo returns information about the database
-func (c *MongoDBConnector) GetInfo(ctx context.Context) (*DatabaseInfo, error) {
+func (c *MongoDBConnector) GetInfo(ctx context.Context) (map[string]string, error) {
+	if c.uri == "" {
+		return nil, fmt.Errorf("database connection not initialized")
+	}
+
+	info := make(map[string]string)
+
 	// Get database stats
+	statsQuery := `
+		let stats = db.stats();
+		let buildInfo = db.serverBuildInfo();
+		print(JSON.stringify({
+			size: stats.dataSize,
+			storage_size: stats.storageSize,
+			collections: stats.collections,
+			objects: stats.objects,
+			version: buildInfo.version
+		}))
+	`
 	args := []string{
 		"--uri", c.uri,
 		"--quiet",
-		"--eval", "JSON.stringify(db.stats())",
+		"--eval", statsQuery,
 	}
 
 	cmd := exec.CommandContext(ctx, "mongosh", args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get database stats: %w", err)
+		return nil, fmt.Errorf("failed to get database info: %w", err)
 	}
 
-	// Get MongoDB version
-	versionArgs := []string{
-		"--uri", c.uri,
-		"--quiet",
-		"--eval", "db.version()",
+	// Parse JSON output
+	var stats struct {
+		Size        int64  `json:"size"`
+		StorageSize int64  `json:"storage_size"`
+		Collections int    `json:"collections"`
+		Objects     int64  `json:"objects"`
+		Version     string `json:"version"`
 	}
 
-	versionCmd := exec.CommandContext(ctx, "mongosh", versionArgs...)
-	versionOutput, err := versionCmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get MongoDB version: %w", err)
+	if err := json.Unmarshal(output, &stats); err != nil {
+		return nil, fmt.Errorf("failed to parse database info: %w", err)
 	}
 
-	// Extract size from stats output (dataSize is in bytes)
-	stats := strings.TrimSpace(string(output))
-	if strings.Contains(stats, "dataSize") {
-		sizeMB := float64(0)
-		fmt.Sscanf(stats, `{"dataSize":%f`, &sizeMB)
-		sizeMB = sizeMB / 1024 / 1024 // Convert to MB
-		return &DatabaseInfo{
-			Size:    fmt.Sprintf("%.2f MB", sizeMB),
-			Version: strings.TrimSpace(string(versionOutput)),
-			Type:    MongoDB,
-		}, nil
-	}
+	info["size"] = fmt.Sprintf("%d", stats.Size)
+	info["storage_size"] = fmt.Sprintf("%d", stats.StorageSize)
+	info["collections"] = fmt.Sprintf("%d", stats.Collections)
+	info["objects"] = fmt.Sprintf("%d", stats.Objects)
+	info["version"] = stats.Version
 
-	return nil, fmt.Errorf("failed to parse database stats")
+	return info, nil
 }
 
 // Type returns the database type

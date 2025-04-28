@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -81,18 +82,25 @@ func (c *PostgreSQLConnector) Backup(ctx context.Context, w io.Writer, tables []
 
 // Restore restores the database from a reader
 func (c *PostgreSQLConnector) Restore(ctx context.Context, r io.Reader) error {
-	cmd := exec.CommandContext(ctx, "pg_restore",
+	if c.host == "" {
+		return fmt.Errorf("database connection not initialized")
+	}
+
+	// Create pg_restore command
+	args := []string{
 		"-h", c.host,
 		"-p", fmt.Sprintf("%d", c.port),
 		"-U", c.user,
 		"-d", c.dbname,
-		"-v", // Verbose
 		"-c", // Clean (drop) database objects before recreating
-		"-1", // Process everything in a single transaction
-		"-")  // Read from stdin
+		"-v", // Verbose mode
+		"--if-exists", // Don't error if object doesn't exist
+	}
 
+	cmd := exec.CommandContext(ctx, "pg_restore", args...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSWORD=%s", c.password))
 	cmd.Stdin = r
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("pg_restore failed: %w", err)
@@ -103,54 +111,121 @@ func (c *PostgreSQLConnector) Restore(ctx context.Context, r io.Reader) error {
 
 // ListTables returns a list of all tables in the database
 func (c *PostgreSQLConnector) ListTables(ctx context.Context) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "psql",
+	if c.host == "" {
+		return nil, fmt.Errorf("database connection not initialized")
+	}
+
+	// Create psql command to list tables
+	query := `SELECT tablename FROM pg_tables WHERE schemaname = 'public';`
+	args := []string{
 		"-h", c.host,
 		"-p", fmt.Sprintf("%d", c.port),
 		"-U", c.user,
 		"-d", c.dbname,
-		"-t", // Tuple only, no header
-		"-A", // Unaligned output
-		"-c", "SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+		"-t", // Tuple only output
+		"-A", // Unaligned output mode
+		"-c", query,
+	}
 
+	cmd := exec.CommandContext(ctx, "psql", args...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSWORD=%s", c.password))
-	
+
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tables: %w", err)
 	}
 
+	// Parse output
 	tables := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(tables) == 1 && tables[0] == "" {
+		return []string{}, nil
+	}
+
 	return tables, nil
 }
 
 // GetInfo returns information about the database
-func (c *PostgreSQLConnector) GetInfo(ctx context.Context) (*DatabaseInfo, error) {
-	cmd := exec.CommandContext(ctx, "psql",
+func (c *PostgreSQLConnector) GetInfo(ctx context.Context) (map[string]string, error) {
+	if c.host == "" {
+		return nil, fmt.Errorf("database connection not initialized")
+	}
+
+	info := make(map[string]string)
+
+	// Get database size
+	sizeQuery := `
+		SELECT pg_size_pretty(pg_database_size(current_database())) as size,
+			   pg_database_size(current_database()) as size_bytes;
+	`
+	args := []string{
 		"-h", c.host,
 		"-p", fmt.Sprintf("%d", c.port),
 		"-U", c.user,
 		"-d", c.dbname,
-		"-t", // Tuple only, no header
-		"-A", // Unaligned output
-		"-c", "SELECT pg_size_pretty(pg_database_size(current_database())), version()")
+		"-t", // Tuple only output
+		"-A", // Unaligned output mode
+		"-c", sizeQuery,
+	}
 
+	cmd := exec.CommandContext(ctx, "psql", args...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSWORD=%s", c.password))
-	
+
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get database info: %w", err)
+		return nil, fmt.Errorf("failed to get database size: %w", err)
 	}
 
 	parts := strings.Split(strings.TrimSpace(string(output)), "|")
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("unexpected output format from database")
+	if len(parts) >= 2 {
+		info["size"] = parts[0]
+		info["size_bytes"] = parts[1]
 	}
 
-	return &DatabaseInfo{
-		Size:    parts[0],
-		Version: parts[1],
-		Type:    PostgreSQL,
-	}, nil
+	// Get version information
+	versionQuery := `SELECT version();`
+	args = []string{
+		"-h", c.host,
+		"-p", fmt.Sprintf("%d", c.port),
+		"-U", c.user,
+		"-d", c.dbname,
+		"-t", // Tuple only output
+		"-A", // Unaligned output mode
+		"-c", versionQuery,
+	}
+
+	cmd = exec.CommandContext(ctx, "psql", args...)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSWORD=%s", c.password))
+
+	output, err = cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get version info: %w", err)
+	}
+
+	info["version"] = strings.TrimSpace(string(output))
+
+	// Get table count
+	tableCountQuery := `SELECT count(*) FROM pg_tables WHERE schemaname = 'public';`
+	args = []string{
+		"-h", c.host,
+		"-p", fmt.Sprintf("%d", c.port),
+		"-U", c.user,
+		"-d", c.dbname,
+		"-t", // Tuple only output
+		"-A", // Unaligned output mode
+		"-c", tableCountQuery,
+	}
+
+	cmd = exec.CommandContext(ctx, "psql", args...)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSWORD=%s", c.password))
+
+	output, err = cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get table count: %w", err)
+	}
+
+	info["table_count"] = strings.TrimSpace(string(output))
+
+	return info, nil
 }
 
 // Type returns the database type

@@ -139,20 +139,23 @@ func (c *SQLiteConnector) Restore(ctx context.Context, r io.Reader) error {
 // ListTables returns a list of all tables in the database
 func (c *SQLiteConnector) ListTables(ctx context.Context) ([]string, error) {
 	if c.db == nil {
-		return nil, fmt.Errorf("database connection not established")
+		return nil, fmt.Errorf("database connection not initialized")
 	}
 
-	// Query to get all table names
-	query := `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`
-	
-	// Execute the query
+	// Query to get all tables
+	query := `
+		SELECT name FROM sqlite_master 
+		WHERE type='table' 
+		AND name NOT LIKE 'sqlite_%'
+		ORDER BY name;
+	`
+
 	rows, err := c.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query tables: %w", err)
+		return nil, fmt.Errorf("failed to list tables: %w", err)
 	}
 	defer rows.Close()
 
-	// Collect table names
 	var tables []string
 	for rows.Next() {
 		var tableName string
@@ -163,50 +166,81 @@ func (c *SQLiteConnector) ListTables(ctx context.Context) ([]string, error) {
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating tables: %w", err)
+		return nil, fmt.Errorf("error iterating table rows: %w", err)
 	}
 
 	return tables, nil
 }
 
 // GetInfo returns information about the database
-func (c *SQLiteConnector) GetInfo(ctx context.Context) (*DatabaseInfo, error) {
+func (c *SQLiteConnector) GetInfo(ctx context.Context) (map[string]string, error) {
 	if c.db == nil {
-		return nil, fmt.Errorf("database connection not established")
+		return nil, fmt.Errorf("database connection not initialized")
 	}
 
-	// Get database file info
+	info := make(map[string]string)
+
+	// Get SQLite version
+	var version string
+	if err := c.db.QueryRowContext(ctx, "SELECT sqlite_version();").Scan(&version); err != nil {
+		return nil, fmt.Errorf("failed to get SQLite version: %w", err)
+	}
+	info["version"] = version
+
+	// Get database size
 	fileInfo, err := os.Stat(c.filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get database file info: %w", err)
 	}
+	info["size"] = fmt.Sprintf("%d", fileInfo.Size())
 
-	// Get list of tables
+	// Get table count
+	var tableCount int
+	query := `
+		SELECT COUNT(*) FROM sqlite_master 
+		WHERE type='table' 
+		AND name NOT LIKE 'sqlite_%';
+	`
+	if err := c.db.QueryRowContext(ctx, query).Scan(&tableCount); err != nil {
+		return nil, fmt.Errorf("failed to get table count: %w", err)
+	}
+	info["table_count"] = fmt.Sprintf("%d", tableCount)
+
+	// Get total row count across all tables
 	tables, err := c.ListTables(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list tables: %w", err)
 	}
 
-	// Get table sizes
-	tableSizes := make(map[string]int64)
+	var totalRows int64
 	for _, table := range tables {
-		// This is an approximation as SQLite doesn't provide easy table size information
-		var count int64
-		err := c.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %q", table)).Scan(&count)
-		if err != nil {
-			continue
+		var rowCount int64
+		query := fmt.Sprintf("SELECT COUNT(*) FROM %q;", table)
+		if err := c.db.QueryRowContext(ctx, query).Scan(&rowCount); err != nil {
+			return nil, fmt.Errorf("failed to get row count for table %s: %w", table, err)
 		}
-		tableSizes[table] = count // This is row count, not actual size
+		totalRows += rowCount
 	}
+	info["total_rows"] = fmt.Sprintf("%d", totalRows)
 
-	// Create database info
-	info := &DatabaseInfo{
-		Name:        filepath.Base(c.filePath),
-		Size:        fileInfo.Size(),
-		Tables:      tables,
-		TableSizes:  tableSizes,
-		LastUpdated: fileInfo.ModTime().Format(time.RFC3339),
+	// Get page size and page count
+	var pageSize, pageCount int
+	if err := c.db.QueryRowContext(ctx, "PRAGMA page_size;").Scan(&pageSize); err != nil {
+		return nil, fmt.Errorf("failed to get page size: %w", err)
 	}
+	if err := c.db.QueryRowContext(ctx, "PRAGMA page_count;").Scan(&pageCount); err != nil {
+		return nil, fmt.Errorf("failed to get page count: %w", err)
+	}
+	info["page_size"] = fmt.Sprintf("%d", pageSize)
+	info["page_count"] = fmt.Sprintf("%d", pageCount)
+	info["allocated_size"] = fmt.Sprintf("%d", int64(pageSize)*int64(pageCount))
+
+	// Get database encoding
+	var encoding string
+	if err := c.db.QueryRowContext(ctx, "PRAGMA encoding;").Scan(&encoding); err != nil {
+		return nil, fmt.Errorf("failed to get database encoding: %w", err)
+	}
+	info["encoding"] = encoding
 
 	return info, nil
 }
