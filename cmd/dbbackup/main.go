@@ -174,14 +174,11 @@ func runBackup(ctx context.Context, cfg *config.Config, logger *logging.Logger) 
 	case database.SQLite:
 		db = &database.SQLiteConnector{}
 	case database.MySQL:
-		// Implement MySQL connector
-		return fmt.Errorf("MySQL connector not implemented yet")
+		db = &database.MySQLConnector{}
 	case database.PostgreSQL:
-		// Implement PostgreSQL connector
-		return fmt.Errorf("PostgreSQL connector not implemented yet")
+		db = &database.PostgreSQLConnector{}
 	case database.MongoDB:
-		// Implement MongoDB connector
-		return fmt.Errorf("MongoDB connector not implemented yet")
+		db = &database.MongoDBConnector{}
 	default:
 		return fmt.Errorf("unsupported database type: %s", dbConfig.Type)
 	}
@@ -211,14 +208,12 @@ func runBackup(ctx context.Context, cfg *config.Config, logger *logging.Logger) 
 	case storage.Local:
 		store = &storage.LocalProvider{}
 	case storage.S3:
-		// Implement S3 provider
-		return fmt.Errorf("S3 storage provider not implemented yet")
+		store = &storage.S3Provider{}
 	case storage.GCS:
 		// Implement GCS provider
 		return fmt.Errorf("GCS storage provider not implemented yet")
 	case storage.Azure:
-		// Implement Azure provider
-		return fmt.Errorf("Azure storage provider not implemented yet")
+		store = &storage.AzureProvider{}
 	default:
 		return fmt.Errorf("unsupported storage type: %s", storeConfig.Type)
 	}
@@ -326,14 +321,11 @@ func runListBackups(ctx context.Context, cfg *config.Config, logger *logging.Log
 	case database.SQLite:
 		db = &database.SQLiteConnector{}
 	case database.MySQL:
-		// Implement MySQL connector
-		return fmt.Errorf("MySQL connector not implemented yet")
+		db = &database.MySQLConnector{}
 	case database.PostgreSQL:
-		// Implement PostgreSQL connector
-		return fmt.Errorf("PostgreSQL connector not implemented yet")
+		db = &database.PostgreSQLConnector{}
 	case database.MongoDB:
-		// Implement MongoDB connector
-		return fmt.Errorf("MongoDB connector not implemented yet")
+		db = &database.MongoDBConnector{}
 	default:
 		return fmt.Errorf("unsupported database type: %s", dbConfig.Type)
 	}
