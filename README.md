@@ -1,6 +1,6 @@
-# BackyardBackup
+# Backyard Backup
 
-BackyardBackup is a flexible and extensible database backup solution that supports multiple database engines and storage providers.
+Backyard Backup is a flexible and extensible database backup solution that supports multiple database engines and storage providers.
 
 ## Features
 
